@@ -175,6 +175,9 @@ def read(path: str | Path) -> dict:
                                 no = ly.findtext("no")
                                 if no:
                                     item["verse"] = int(no) + 1
+                                tk = ly.findtext("ticks")
+                                if tk and int(tk) > 0:
+                                    item["melisma"] = str(Fraction(int(tk), 4 * ir.DIVISION))
                                 syl = ly.findtext("syllabic")
                                 if syl and syl != "single":
                                     item["syllabic"] = syl

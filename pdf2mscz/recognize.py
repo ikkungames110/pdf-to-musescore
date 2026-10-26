@@ -69,6 +69,7 @@ class Event:
     onset: Fraction | None = None
     lyrics: list = field(default_factory=list)
     measure_rest: bool = False
+    abs: Fraction | None = None
 
     @property
     def cx(self):
@@ -212,6 +213,9 @@ class Recognizer:
         self.timesig = "4/4"
         self.is_drum = [False] * self.nstaves
         self.pending_ties: dict[tuple[int, int], Head] = {}  # (staff, pos) -> 段をまたぐタイの始点
+        self.abs_time = Fraction(0)          # 現在の小節の開始位置 (曲頭からの全音符数)
+        self.melismas: list = []             # この段の歌詞の伸ばし線 [(歌詞, 音符, 線の右端, 五線)]
+        self.pending_melisma: dict = {}      # (五線, 番) -> (歌詞, 音符) 段をまたぐ伸ばし線
 
     # ------------------------------------------------------------ ページ全体
     def run(self) -> dict:
@@ -255,15 +259,23 @@ class Recognizer:
         rows = []
         for y, ws in sorted(lines.items()):
             ws.sort(key=lambda w: w.x0)
-            text = " ".join(w.text for w in ws)
-            rows.append((y, ws[0].x0, ws[-1].x1, max(w.size for w in ws), text))
+            # 同じ高さでも大きく離れていれば別の項目 (中央のタイトルと右の作曲者など)
+            chunks = [[ws[0]]]
+            for w in ws[1:]:
+                if w.x0 - chunks[-1][-1].x1 > 3 * max(w.size, chunks[-1][-1].size):
+                    chunks.append([w])
+                else:
+                    chunks[-1].append(w)
+            for ch in chunks:
+                text = " ".join(w.text for w in ch)
+                rows.append((y, ch[0].x0, ch[-1].x1, max(w.size for w in ch), text))
         meta = score["meta"]
         if rows:
             big = max(rows, key=lambda r: r[3])
             if big[3] >= 14:
                 meta["title"] = big[4]
             composer, lyricist, subtitle = [], [], []
-            for r in rows:
+            for r in sorted(rows, key=lambda r: (r[0], r[1])):
                 if r is big and "title" in meta:
                     continue
                 if "=" in r[4] and len(r[4]) < 12:
@@ -671,7 +683,7 @@ class Recognizer:
                 for v in voices:
                     _fix_tuplet_ratio(v, tslen)
                 self._pitches(evs, k, sorted(mids, key=lambda c: c[0]))
-                stir["voices"] = [self._to_ir(v, tslen) for v in voices]
+                stir["voices"] = [self._to_ir(v, tslen, self.abs_time) for v in voices]
                 for x, t, v in sorted(mids, key=lambda c: c[0]):
                     after = [e for e in evs if e.x > x and e.onset is not None]
                     at = min(after, key=lambda e: e.x).onset if after else tslen
@@ -721,7 +733,25 @@ class Recognizer:
             if j == nmeas - 1:
                 m["lineBreak"] = True
             score["measures"].append(m)
-        # 歌詞はイベントに付与されているので IR 化後に反映済み
+            self.abs_time += mlen
+        self._resolve_melismas(sysm, sp)
+
+    def _resolve_melismas(self, sysm: System, sp: float):
+        """歌詞の伸ばし線の長さ (最後に覆う音符までの距離) を求める。"""
+        for item, ev, x_end, st, verse in self.melismas:
+            if ev.abs is None:
+                continue
+            covered = [e for e in self._cur_chords if e.staff is st and e.voice == ev.voice and e.abs is not None
+                       and e.abs > ev.abs and e.cx <= x_end + 0.5 * sp]
+            if covered:
+                last = max(covered, key=lambda e: e.abs)
+                item["melisma"] = str(last.abs - ev.abs)
+            else:
+                # 1 つの音符の中だけの伸ばし線 (MuseScore では 1 tick で表す)
+                item["melisma"] = str(Fraction(1, 4 * ir.DIVISION))
+            if x_end > sysm.x1 - 2 * sp:
+                self.pending_melisma[(st.index, verse)] = (item, ev)
+        self.melismas = []
 
     def _starts_with_repeat(self, page, sysm, sp) -> bool:
         dots = [g for g in page.glyphs if g.code in (0xE043, 0xE044) and sysm.top - sp <= g.y <= sysm.bottom + sp]
@@ -820,12 +850,13 @@ class Recognizer:
                 self.key[k] = v
 
     # ------------------------------------------------------------ IR 化
-    def _to_ir(self, voice: list[Event], tslen: Fraction) -> list:
+    def _to_ir(self, voice: list[Event], tslen: Fraction, start: Fraction = Fraction(0)) -> list:
         out = []
         t = Fraction(0)
         groups: dict[int, dict] = {}
         for ev in voice:
             ev.onset = t
+            ev.abs = start + t
             t += ev.length() if not ev.measure_rest else tslen
             if ev.kind == "rest":
                 item = {"type": "rest", "duration": "measure" if ev.measure_rest else ev.base}
@@ -1060,12 +1091,12 @@ class Recognizer:
             if inside and r.y1 < sysm.top + sp:
                 txt = "".join(c.c for c in sorted(inside, key=lambda c: c.x0)).strip()
                 if txt:
-                    out.setdefault(measure_of(r.x0 + 1.5 * sp), []).append(("rehearsal", txt))
+                    out.setdefault(measure_of((r.x0 + r.x1) / 2 + 0.5 * sp), []).append(("rehearsal", txt))
                     used.update(id(c) for c in inside)
         # 枠なしの練習番号: 最上段の上にある太字の短い文字列
         for w in group_words([c for c in chars if id(c) not in used and "Bold" in c.font and c.y < sysm.top]):
             if len(w.text) <= 3 and w.size >= 9 and w.y > sysm.top - 8 * sp:
-                out.setdefault(measure_of(w.x0 + 1.5 * sp), []).append(("rehearsal", w.text))
+                out.setdefault(measure_of(w.cx + 0.5 * sp), []).append(("rehearsal", w.text))
                 used.update(id(c) for c in w.chars)
         # 小節番号 (段頭の斜体数字) と連符の数字は除外
         rest = [c for c in chars if id(c) not in used and not ("Italic" in c.font and c.c.isdigit())]
@@ -1117,6 +1148,16 @@ class Recognizer:
         def dash_between(x0, x1):
             return any(x0 - 0.5 <= sg.x0 and sg.x1 <= x1 + 0.5 for sg in dashes)
 
+        unders = [sg for sg in page.segs if sg.horizontal and abs(sg.y0 - base) < 0.2 * size
+                  and sg.x1 - sg.x0 > 0.4 * size and sysm.x0 - sp <= sg.x0 <= sysm.x1 + sp]
+        # 前の段から続く伸ばし線 (段頭で、前に歌詞がない)
+        cont = self.pending_melisma.pop((st.index, verse), None)
+        if cont is not None:
+            first_x = row[0].x0 if row else sysm.x1
+            lead = [sg for sg in unders if sg.x1 <= first_x + 0.5 and sg.x0 < sysm.x0 + 15 * sp]
+            if lead:
+                self.melismas.append((cont[0], cont[1], max(sg.x1 for sg in lead), st, verse))
+
         items = []  # [(lyric dict, 前にハイフン, 後ろにハイフン)]
         prev_x1 = sysm.x0
         for wi, w in enumerate(row):
@@ -1133,6 +1174,10 @@ class Recognizer:
                 before = si_ == 0 and dash_between(prev_x1, w.x0)
                 after = si_ == len(segs) - 1 and dash_between(w.x1, next_x0)
                 items.append([item, before, after])
+                if si_ == len(segs) - 1:
+                    ul = [sg for sg in unders if w.x1 - 0.5 <= sg.x0 <= w.x1 + 1.5 * size]
+                    if ul:
+                        self.melismas.append((item, ev, max(sg.x1 for sg in ul), st, verse))
             prev_x1 = w.x1
         for item, before, after in items:
             syl = {(False, True): "begin", (True, True): "middle", (True, False): "end"}.get((before, after))

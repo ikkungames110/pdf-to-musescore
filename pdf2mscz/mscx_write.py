@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 from fractions import Fraction
 from pathlib import Path
@@ -198,6 +199,10 @@ class _VoiceWriter:
                 w.leaf("no", ly["verse"] - 1)
             if ly.get("syllabic", "single") != "single":
                 w.leaf("syllabic", ly["syllabic"])
+            if ly.get("melisma"):
+                f = Fraction(ly["melisma"])
+                w.leaf("ticks", int(f * 4 * ir.DIVISION))
+                w.leaf("ticks_f", _frac(f))
             w.leaf("text", ly["text"])
             w.close("Lyrics")
         for n in ev["notes"]:
@@ -337,12 +342,18 @@ def _key_writer(w: _W, key: int):
     return fn
 
 
+def _rich(text: str) -> str:
+    """<sym>名前</sym> だけはタグとして残し、他はエスケープする。"""
+    parts = re.split(r"(<sym>[A-Za-z0-9]+</sym>)", text)
+    return "".join(p if p.startswith("<sym>") else escape(p) for p in parts)
+
+
 def _text_writer(w: _W, tag: str, text: str, extra=None):
     def fn():
         w.open(tag)
         if extra:
             extra()
-        w.leaf("text", text)
+        w.line(f"<text>{_rich(text)}</text>")
         w.close(tag)
     return fn
 
