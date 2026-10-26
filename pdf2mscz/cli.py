@@ -72,15 +72,49 @@ def cmd_validate(a):
 
 
 def cmd_images(a):
+    from .raster import split_systems
     import pymupdf
     src = Path(a.pdf)
     outdir = Path(a.outdir or src.with_suffix(""))
     outdir.mkdir(parents=True, exist_ok=True)
     doc = pymupdf.open(src)
     for i, page in enumerate(doc):
+        pix = page.get_pixmap(dpi=a.dpi)
         p = outdir / f"page{i + 1:02d}.png"
-        page.get_pixmap(dpi=a.dpi).save(p)
+        pix.save(p)
         print(p)
+        if a.split:
+            for j, (y0, y1) in enumerate(split_systems(pix)):
+                clip = pymupdf.Rect(0, y0 * 72 / a.dpi, page.rect.width, y1 * 72 / a.dpi)
+                q = outdir / f"page{i + 1:02d}_sys{j + 1:02d}.png"
+                page.get_pixmap(dpi=a.dpi * 3 // 2, clip=clip).save(q)
+                print(q)
+
+
+def cmd_crop(a):
+    """ベクター PDF の指定小節を切り出す (警告の確認用)。"""
+    import pymupdf
+    from .extract import extract
+    from .layout import find_systems, stem_width
+    pages = extract(a.pdf)
+    sw = stem_width(pages)
+    k = 0
+    for p in pages:
+        for s in find_systems(p, sw):
+            n = len(s.barlines)
+            if k < a.measure <= k + n:
+                j = a.measure - k - 1
+                x0 = s.barlines[j - 1].x if j > 0 else s.x0
+                x1 = s.barlines[j].x
+                sp = s.staves[0].sp
+                clip = pymupdf.Rect(max(0, x0 - 12 * sp), s.top - 8 * sp, min(p.width, x1 + 12 * sp), s.bottom + 8 * sp)
+                out = a.output or f"m{a.measure}.png"
+                pymupdf.open(a.pdf)[p.index].get_pixmap(dpi=a.dpi, clip=clip).save(out)
+                print(f"{out} (ページ {p.index + 1}、段内 {j + 1} 小節目)")
+                return
+            k += n
+    print("その小節は見つかりませんでした")
+    sys.exit(1)
 
 
 def cmd_mscz_to_ir(a):
@@ -116,7 +150,15 @@ def main(argv=None):
     c.add_argument("pdf")
     c.add_argument("-d", "--outdir")
     c.add_argument("--dpi", type=int, default=200)
+    c.add_argument("--split", action="store_true", help="段 (システム) ごとに切り出した画像も作る")
     c.set_defaults(func=cmd_images)
+
+    c = sub.add_parser("crop", help="ベクター PDF の指定小節を画像で切り出す (警告の確認用)")
+    c.add_argument("pdf")
+    c.add_argument("measure", type=int, help="小節番号 (1 始まり)")
+    c.add_argument("-o", "--output")
+    c.add_argument("--dpi", type=int, default=250)
+    c.set_defaults(func=cmd_crop)
 
     c = sub.add_parser("mscz-to-ir", help=".mscz/.mscx を中間表現 JSON にする (お手本・比較用)")
     c.add_argument("mscz")
