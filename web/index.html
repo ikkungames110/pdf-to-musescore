@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF 楽譜 → MuseScore 変換</title>
+<meta name="description" content="MuseScore などから書き出した PDF 楽譜を解析して、MuseScore (.mscz) ファイルに変換します。処理はすべてブラウザ内で行われます。">
+<style>
+  :root {
+    --bg: #f6f5f1; --panel: #ffffff; --text: #1d1d1f; --muted: #6b6b70; --line: #e2e0d8;
+    --accent: #2f5d8a; --accent-ink: #ffffff; --warn: #9a5b00; --warn-bg: #fff4e0; --ok: #2c7a4b; --err: #b3261e;
+    --drop: #eef3f8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151618; --panel: #1f2023; --text: #ececee; --muted: #a0a0a8; --line: #33343a;
+      --accent: #7fb0e0; --accent-ink: #0f1a24; --warn: #f0b85a; --warn-bg: #3a2c12; --ok: #6fcf97; --err: #ff8a80;
+      --drop: #1c2530;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.7 system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: .02em; }
+  .lead { color: var(--muted); margin: 0 0 24px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 18px; }
+  h2 { font-size: 17px; margin: 0 0 12px; }
+  .drop { border: 2px dashed var(--line); background: var(--drop); border-radius: 10px; padding: 34px 16px;
+          text-align: center; cursor: pointer; transition: border-color .15s; }
+  .drop.over { border-color: var(--accent); }
+  .drop strong { display: block; font-size: 16px; }
+  .drop span { color: var(--muted); font-size: 13px; }
+  #status { margin-top: 12px; color: var(--muted); font-size: 14px; min-height: 1.7em; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent);
+             border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .result { border-top: 1px solid var(--line); padding: 14px 0 4px; }
+  .result:first-child { border-top: 0; }
+  .result .name { font-weight: 600; word-break: break-all; }
+  .meta { color: var(--muted); font-size: 13px; margin: 2px 0 8px; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  a.btn, button.btn { display: inline-block; background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px;
+           padding: 7px 14px; font: inherit; font-size: 14px; text-decoration: none; cursor: pointer; }
+  a.btn.sub, button.btn.sub { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .warns { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 8px 12px; margin-top: 10px; font-size: 13px; }
+  .warns ul { margin: 4px 0 0; padding-left: 18px; }
+  .ok { color: var(--ok); font-size: 13px; margin-top: 8px; }
+  .err { color: var(--err); font-size: 14px; margin-top: 8px; white-space: pre-wrap; }
+  ol, ul { padding-left: 20px; }
+  code { background: var(--drop); border-radius: 4px; padding: 1px 5px; font-size: 13px; }
+  footer { color: var(--muted); font-size: 13px; text-align: center; margin-top: 28px; }
+  footer a { color: var(--muted); }
+  @media (max-width: 520px) { h1 { font-size: 21px; } section { padding: 16px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>PDF 楽譜 → MuseScore 変換</h1>
+  <p class="lead">MuseScore などから書き出した PDF 楽譜を解析して <code>.mscz</code> を作ります。PDF はアップロードされず、すべてこのブラウザの中で処理されます。</p>
+
+  <section>
+    <h2>PDF を変換</h2>
+    <label class="drop" id="drop">
+      <input type="file" id="pdfs" accept="application/pdf,.pdf" multiple hidden>
+      <strong>PDF をここにドロップ、またはクリックして選択</strong>
+      <span>複数まとめて変換できます</span>
+    </label>
+    <div id="status"><span class="spinner"></span>準備中…</div>
+    <div id="results"></div>
+  </section>
+
+  <section>
+    <h2>中間表現 JSON から作る</h2>
+    <p class="meta">Claude Code で読み取った JSON (HITL) や、要確認箇所を直した JSON を <code>.mscz</code> にします。</p>
+    <label class="drop" id="drop2">
+      <input type="file" id="jsons" accept="application/json,.json" hidden>
+      <strong>JSON を選択</strong>
+      <span>形式: <a href="IR_FORMAT.md">IR_FORMAT.md</a></span>
+    </label>
+    <div id="results2"></div>
+  </section>
+
+  <section>
+    <h2>対応している PDF</h2>
+    <ul>
+      <li><strong>ベクター PDF</strong> (MuseScore・Finale・Dorico などから書き出したもの): 自動で変換します。音符・休符・連符・タイ・調号・音部記号・歌詞・コードネーム・練習番号・テンポに対応。</li>
+      <li><strong>紙をスキャンした画像の PDF</strong>: 自動変換はできません。Claude Code に <a href="hitl_omr.md">hitl_omr.md</a> の手順で読ませると、上の「JSON から作る」で変換できます。</li>
+      <li>音価の合計が合わない小節は「要確認」として表示されます。<a href="hitl_review.md">hitl_review.md</a> の手順で直せます。</li>
+    </ul>
+  </section>
+
+  <footer>
+    <a href="https://github.com/ikkungames110/pdf-to-musescore">GitHub</a> ・ <a href="https://shianstudio.com">shianstudio</a>
+  </footer>
+</main>
+<script>
+const statusEl = document.getElementById("status");
+const worker = new Worker("worker.js");
+let ready = false, nextId = 1;
+const pending = new Map();
+const queue = [];
+
+function setStatus(html, spin) { statusEl.innerHTML = (spin ? '<span class="spinner"></span>' : "") + html; }
+
+worker.onmessage = (ev) => {
+  const m = ev.data;
+  if (m.type === "status") setStatus(m.text, true);
+  else if (m.type === "ready") { ready = true; setStatus("準備完了。PDF を選んでください。"); }
+  else if (m.type === "fatal") setStatus('<span class="err">読み込みに失敗しました: ' + esc(m.text) + "</span>");
+  else if (pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
+};
+
+function call(msg, transfer) {
+  return new Promise((resolve) => {
+    msg.id = nextId++;
+    pending.set(msg.id, resolve);
+    worker.postMessage(msg, transfer || []);
+  });
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+function dlLink(data, name, type, label, sub) {
+  const url = URL.createObjectURL(new Blob([data], { type }));
+  return `<a class="btn${sub ? " sub" : ""}" href="${url}" download="${esc(name)}">${label}</a>`;
+}
+
+function warningsHtml(ws) {
+  if (!ws || !ws.length) return '<div class="ok">要確認の箇所はありません</div>';
+  const items = ws.slice(0, 20).map((w) => {
+    const loc = [w.page && `p.${w.page}`, w.measure && `${w.measure}小節`, w.staff && `五線${w.staff}`, w.voice && `声部${w.voice}`].filter(Boolean).join(" ");
+    return `<li>${esc(loc)}: ${esc(w.msg)}</li>`;
+  }).join("");
+  const more = ws.length > 20 ? `<li>ほか ${ws.length - 20} 件 (JSON に全件あります)</li>` : "";
+  return `<div class="warns">要確認 ${ws.length} 件<ul>${items}${more}</ul></div>`;
+}
+
+async function convertFiles(files) {
+  const box = document.getElementById("results");
+  for (const f of files) {
+    const div = document.createElement("div");
+    div.className = "result";
+    div.innerHTML = `<div class="name">${esc(f.name)}</div><div class="meta"><span class="spinner"></span>${ready ? "解析中…" : "準備ができ次第解析します…"}</div>`;
+    box.prepend(div);
+    const buf = await f.arrayBuffer();
+    const t0 = performance.now();
+    const res = await call({ type: "convert", name: f.name, data: buf }, [buf]);
+    const base = f.name.replace(/\.pdf$/i, "");
+    if (res.type === "error") { div.querySelector(".meta").outerHTML = `<div class="err">${esc(res.text)}</div>`; continue; }
+    const score = JSON.parse(res.json);
+    if (!res.mscz) {
+      div.querySelector(".meta").outerHTML = `<div class="err">五線が見つかりませんでした。画像 (スキャン) の PDF の可能性があります。<a href="hitl_omr.md">HITL の手順</a>で変換してください。</div>`;
+      continue;
+    }
+    const sec = ((performance.now() - t0) / 1000).toFixed(1);
+    const title = score.meta && score.meta.title ? ` ・「${esc(score.meta.title)}」` : "";
+    div.querySelector(".meta").innerHTML = `${score.parts.length} パート ・ ${score.measures.length} 小節${title} ・ ${sec} 秒`;
+    div.insertAdjacentHTML("beforeend", `<div class="btns">${dlLink(res.mscz, base + ".mscz", "application/octet-stream", ".mscz をダウンロード")}${dlLink(res.json, base + ".json", "application/json", "中間表現 JSON", true)}</div>${warningsHtml(score.warnings)}`);
+  }
+}
+
+async function convertJson(file) {
+  const box = document.getElementById("results2");
+  const text = await file.text();
+  const base = file.name.replace(/\.json$/i, "");
+  box.innerHTML = `<div class="meta"><span class="spinner"></span>変換中…</div>`;
+  let res = await call({ type: "from_ir", text });
+  let out = JSON.parse(res.json || "{}");
+  if (res.type === "error") { box.innerHTML = `<div class="err">${esc(res.text)}</div>`; return; }
+  if (!res.mscz) {
+    const list = out.errors.slice(0, 30).map((e) => `<li>${esc(e)}</li>`).join("");
+    box.innerHTML = `<div class="warns">JSON に ${out.errors.length} 件の問題があります<ul>${list}</ul></div><div class="btns" style="margin-top:10px"><button class="btn sub" id="force">問題を無視して出力</button></div>`;
+    document.getElementById("force").onclick = async () => {
+      res = await call({ type: "from_ir", text, force: true });
+      if (res.mscz) box.innerHTML = `<div class="btns">${dlLink(res.mscz, base + ".mscz", "application/octet-stream", ".mscz をダウンロード")}</div>`;
+    };
+    return;
+  }
+  box.innerHTML = `<div class="meta">${out.score.parts.length} パート ・ ${out.score.measures} 小節</div><div class="btns">${dlLink(res.mscz, base + ".mscz", "application/octet-stream", ".mscz をダウンロード")}</div>`;
+}
+
+function setupDrop(id, inputId, handler) {
+  const drop = document.getElementById(id), input = document.getElementById(inputId);
+  input.addEventListener("change", () => { if (input.files.length) handler([...input.files]); input.value = ""; });
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files.length) handler([...e.dataTransfer.files]); });
+}
+setupDrop("drop", "pdfs", convertFiles);
+setupDrop("drop2", "jsons", (fs) => convertJson(fs[0]));
+
+// 動作確認用: ?test=ファイル名 で同じ場所の PDF を自動変換する
+const testFile = new URLSearchParams(location.search).get("test");
+if (testFile) {
+  fetch(testFile).then((r) => r.blob()).then((b) => convertFiles([new File([b], testFile)]))
+    .then(() => {
+      document.title = "TEST-DONE";
+      fetch("/__log", { method: "POST", body: document.getElementById("results").innerText + "\n" + statusEl.innerText }).catch(() => {});
+    });
+}
+</script>
+</body>
+</html>
