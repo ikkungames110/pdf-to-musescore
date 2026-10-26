@@ -149,9 +149,9 @@ def _load_drumset() -> dict:
     for m in re.finditer(r'<Drum pitch="(\d+)">\s*<head>(\w+)</head>\s*<line>(-?\d+)</line>', text):
         pitch, head, line = int(m.group(1)), m.group(2), int(m.group(3))
         shape = {"cross": "cross", "normal": "normal", "diamond": "diamond"}.get(head, head)
-        key = (line, shape)
-        if key not in table or pitch == 36:
-            table[key] = pitch
+        table.setdefault((line, shape), pitch)
+    # 見た目が同じ楽器は、手元の楽譜で使用頻度が高い方を既定にする
+    table.update({(7, "normal"): 35, (3, "normal"): 38, (5, "normal"): 41, (0, "normal"): 48, (-3, "cross"): 52})
     return table
 
 
@@ -611,6 +611,11 @@ class Recognizer:
             flats = sum(1 for v in vals if v < 0)
             key_change[(j, st.index)] = sharps if sharps else -flats
 
+        # 段頭では調号が必ず再掲されるので、無ければハ長調 (調号なし)
+        for k in range(len(staves)):
+            if (0, k) not in key_change and nmeas:
+                key_change[(0, k)] = 0
+
         # ---- 小節ごとに処理
         self._cur_chords = chords
         texts = self._texts(page, sysm, sp, bounds)
@@ -708,8 +713,16 @@ class Recognizer:
             else:
                 cols.append([e])
         multi = any(len(c) > 1 for c in cols)
+
+        def rest_shift(e):
+            # 休符の標準位置からのずれ (負 = 上, 正 = 下)。全休符は第 4 線から下がる
+            default = st.top + sp if e.base in ("whole", "breve") else st.mid
+            return (e.y - default) / sp
+
+        # 他の音と並ぶ全休符 (小節休符) や、上下にずらされた休符があれば多声部
+        if not multi and len(evs) > 1:
+            multi = any(e.kind == "rest" and abs(rest_shift(e)) >= 1.5 for e in evs)
         if not multi:
-            # 単声部でも、休符が大きくずれて置かれていたら別声部
             for e in evs:
                 e.voice = 0
             v = [evs]
@@ -719,7 +732,7 @@ class Recognizer:
                     e = c[0]
                     if e.kind == "chord" and e.stem_dir == "down":
                         e.voice = 1
-                    elif e.kind == "rest" and e.y > st.mid + 1.5 * sp:
+                    elif e.kind == "rest" and rest_shift(e) > 0.5:
                         e.voice = 1
                     else:
                         e.voice = 0
@@ -807,7 +820,7 @@ class Recognizer:
     def _tuplets(self, page, sysm, chords, rests, beam_groups, segs, sp):
         nums = []
         for c in page.chars:
-            if c.c.isdigit() and "Italic" in c.font and sysm.x0 + 2 * sp < c.x0 < sysm.x1 and sysm.top - 6 * sp < c.y < sysm.bottom + 6 * sp:
+            if c.c.isdigit() and "Italic" in c.font and sysm.x0 - sp < c.x0 < sysm.x1 and sysm.top - 6 * sp < c.y < sysm.bottom + 6 * sp:
                 nums.append(c)
         for g in page.glyphs:
             if 0xE880 <= g.code <= 0xE889 and sysm.x0 < g.x < sysm.x1 and sysm.top - 6 * sp < g.y < sysm.bottom + 6 * sp:
@@ -820,6 +833,10 @@ class Recognizer:
                 merged[-1] = (merged[-1][0] + c.c, c.y, merged[-1][2], c.x1)
             else:
                 merged.append((c.c, c.y, c.x0, c.x1))
+        # 小節番号 (段頭・小節線の直後で、最上段より上) を除く
+        starts = [sysm.x0] + [b.x_end for b in sysm.barlines]
+        merged = [t for t in merged
+                  if not (t[1] < sysm.top - 0.5 * sp and any(-1.5 * sp <= t[2] - x <= 1.5 * sp for x in starts))]
         events = chords + rests
         gid = 0
         for text, y, x0, x1 in merged:
@@ -858,9 +875,25 @@ class Recognizer:
                 if group:
                     gx0, gx1 = min(e.cx for e in group), max(e.cx for e in group)
                     group += [r for r in rests if r.staff is staff and gx0 < r.cx < gx1]
-            group = [e for e in group if e.tuplet is None]
+            group = sorted((e for e in group if e.tuplet is None), key=lambda e: e.cx)
             if not group:
                 continue
+            # 数字の下にある、音価の合計が n × (2 のべき乗分の 1) になる連続部分を選ぶ
+            best_rng, best_score = None, None
+            for i in range(len(group)):
+                total = Fraction(0)
+                for j in range(i, len(group)):
+                    e = group[j]
+                    total += ir.DURATIONS[e.base] * (2 - Fraction(1, 2**e.dots))
+                    unit = total / n
+                    if unit.numerator != 1 or unit.denominator & (unit.denominator - 1):
+                        continue
+                    center = (group[i].cx + group[j].cx) / 2
+                    score = (abs(center - cx), -(j - i))
+                    if best_score is None or score < best_score:
+                        best_rng, best_score = (i, j), score
+            if best_rng is not None:
+                group = group[best_rng[0]:best_rng[1] + 1]
             normal = 1
             while normal * 2 < n:
                 normal *= 2
