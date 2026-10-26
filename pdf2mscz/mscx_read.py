@@ -109,10 +109,15 @@ def read(path: str | Path) -> dict:
                         acc = e.findtext("accidental") or e.findtext("concertKey")
                         if acc is not None:
                             m["key"] = int(acc)
+                            if t:
+                                m["keyAt"] = str(t)
                     elif tag == "Clef":
                         c = e.findtext("concertClefType")
                         if c and not voices:
-                            st["clef"] = c
+                            if t == 0:
+                                st["clef"] = c
+                            else:
+                                st.setdefault("changes", []).append({"at": str(t), "clef": c})
                     elif tag == "Tempo" and si == 0:
                         m["tempo"] = {"bpm": round(float(e.findtext("tempo")) * 60, 3), "text": _text(e.find("text"))}
                     elif tag == "RehearsalMark" and si == 0:

@@ -555,14 +555,26 @@ class Recognizer:
             evs = events_by[j][k]
             return bool(evs) and x > max(e.x1 for e in evs)
 
-        clef_changes = {}  # (j, k) -> [(x, clef)]
+        # 変更 (音部記号・調号): (j, k) -> [(x, 種類, 値)]。x=None は小節頭
+        changes: dict[tuple, list] = {}
+
+        def last_event_x(j, k):
+            evs = events_by[j][k]
+            return max((e.x1 for e in evs), default=None)
+
         for k, x, c in clefs:
             j = measure_of(x)
             if j is None:
                 continue
-            if is_courtesy(j, k, x):
-                continue
-            clef_changes.setdefault((j, k), []).append((x, c))
+            last = last_event_x(j, k)
+            if last is None or x <= first_event_x(j, k):
+                changes.setdefault((j, k), []).append((None, "clef", c))
+            elif x > last:
+                # 小節線の直前の音部記号は次の小節から (段末なら次の段で再掲される)
+                if j + 1 < nmeas:
+                    changes.setdefault((j + 1, k), []).append((None, "clef", c))
+            else:
+                changes.setdefault((j, k), []).append((x, "clef", c))
 
         ts_change = {}
         for k, gs in timesigs.items():
@@ -590,7 +602,6 @@ class Recognizer:
                     ts = f"{num}/{den}"
                 ts_change.setdefault(j, ts)
 
-        key_change = {}  # (j, k) -> key
         free_accs.sort(key=lambda a: (_nearest_staff(staves, a.y)[0].index, a.x))
         acc_groups: list[list[Glyph]] = []
         for a in free_accs:
@@ -604,17 +615,22 @@ class Recognizer:
             j = measure_of(grp[0].x)
             if j is None or is_courtesy(j, st.index, grp[0].x):
                 continue
-            if grp[0].x > first_event_x(j, st.index):
-                continue  # 小節の途中の浮いた臨時記号は無視
             vals = [smufl.ACCIDENTALS[a.code] for a in grp]
             sharps = sum(1 for v in vals if v > 0)
             flats = sum(1 for v in vals if v < 0)
-            key_change[(j, st.index)] = sharps if sharps else -flats
+            key = sharps if sharps else -flats
+            if grp[0].x > first_event_x(j, st.index):
+                last = last_event_x(j, st.index)
+                if len(grp) < 2 and key != 0 or last is None or grp[0].x > last:
+                    continue  # 浮いた臨時記号は無視
+                changes.setdefault((j, st.index), []).append((grp[0].x, "key", key))
+            else:
+                changes.setdefault((j, st.index), []).append((None, "key", key))
 
         # 段頭では調号が必ず再掲されるので、無ければハ長調 (調号なし)
         for k in range(len(staves)):
-            if (0, k) not in key_change and nmeas:
-                key_change[(0, k)] = 0
+            if nmeas and not any(t == "key" and x is None for x, t, _ in changes.get((0, k), [])):
+                changes.setdefault((0, k), []).append((None, "key", 0))
 
         # ---- 小節ごとに処理
         self._cur_chords = chords
@@ -631,31 +647,40 @@ class Recognizer:
             tslen = ir.parse_timesig(self.timesig)
             mnum = len(score["measures"]) + 1
             totals = []
+            # 調号は最初の音高五線を代表に
+            ref = next((k for k in range(len(staves)) if not self.is_drum[k] and not any(
+                t == "clef" and v == "PERC" for _, t, v in changes.get((j, k), []))), 0)
             for k, st in enumerate(staves):
                 stir = {}
-                for x, c in sorted(clef_changes.get((j, k), [])):
-                    if c == "PERC":
+                mids = []
+                for x, t, v in changes.get((j, k), []):
+                    if t == "clef" and v == "PERC":
                         self.is_drum[k] = True
-                    if c != self.clef[k] or (mnum == 1):
-                        if x <= first_event_x(j, k) or mnum == 1:
-                            stir["clef"] = c
-                            self.clef[k] = c
-                        else:
-                            # 小節途中の変更は次の小節から有効 (簡略化)
-                            stir["clef"] = c
-                            self.clef[k] = c
-                if (j, k) in key_change:
-                    self.key[k] = key_change[(j, k)]
+                    if x is not None:
+                        mids.append((x, t, v))
+                    elif t == "clef":
+                        if v != self.clef[k] or mnum == 1:
+                            stir["clef"] = v
+                        self.clef[k] = v
+                    else:
+                        self.key[k] = v
+                        if k == ref:
+                            m["key"] = v
                 evs = sorted(events_by[j][k], key=lambda e: e.cx)
                 voices = self._voices(evs, st, sp, tslen, mnum, k)
-                self._pitches(evs, k)
+                for v in voices:
+                    _fix_tuplet_ratio(v, tslen)
+                self._pitches(evs, k, sorted(mids, key=lambda c: c[0]))
                 stir["voices"] = [self._to_ir(v, tslen) for v in voices]
+                for x, t, v in sorted(mids, key=lambda c: c[0]):
+                    after = [e for e in evs if e.x > x and e.onset is not None]
+                    at = min(after, key=lambda e: e.x).onset if after else tslen
+                    stir.setdefault("changes", []).append({"at": str(at), t: v})
+                    if t == "key" and k == ref:
+                        m["key"] = v
+                        m["keyAt"] = str(at)
                 totals.append(sum((e.length() for e in voices[0]), Fraction(0)) if voices and voices[0] else None)
                 m["staves"].append(stir)
-            # 調号は最初の音高五線を代表に
-            ref = next((k for k in range(len(staves)) if not self.is_drum[k]), 0)
-            if (j, ref) in key_change:
-                m["key"] = key_change[(j, ref)]
             # 弱起・不完全小節
             valid = [t for t in totals if t]
             if valid:
@@ -759,11 +784,18 @@ class Recognizer:
         return v
 
     # ------------------------------------------------------------ 音高
-    def _pitches(self, evs: list[Event], k: int):
-        clef = self.clef[k]
-        top = smufl.CLEF_TOP.get(clef, 38)
+    def _pitches(self, evs: list[Event], k: int, mids: list = ()):
+        top = smufl.CLEF_TOP.get(self.clef[k], 38)
         state: dict[int, int] = {}
+        mids = list(mids)
         for ev in sorted(evs, key=lambda e: e.x):
+            while mids and mids[0][0] < ev.x:
+                _, t, v = mids.pop(0)
+                if t == "clef":
+                    self.clef[k] = v
+                    top = smufl.CLEF_TOP.get(v, 38)
+                else:
+                    self.key[k] = v
             for h in ev.heads:
                 if self.is_drum[k]:
                     h.drum = DRUMSET.get((h.pos, h.shape)) or DRUMSET.get((h.pos, "normal")) or 38
@@ -781,6 +813,11 @@ class Recognizer:
                 else:
                     alter = state.get(d, _key_alter(self.key[k], step))
                 h.pitch = ir.pitch_name(step, alter, octave)
+        for _, t, v in mids:
+            if t == "clef":
+                self.clef[k] = v
+            else:
+                self.key[k] = v
 
     # ------------------------------------------------------------ IR 化
     def _to_ir(self, voice: list[Event], tslen: Fraction) -> list:
@@ -1039,29 +1076,65 @@ class Recognizer:
                 if a < 0:
                     continue  # 一番上の五線より上の文字 (表情記号など) は今は扱わない
                 verse += 1
-                self._assign_lyrics(row, staves[a], verse, sp)
+                self._assign_lyrics(row, staves[a], verse, sp, page, sysm)
         return out
 
-    def _assign_lyrics(self, row: list[TextWord], st: Staff, verse: int, sp: float):
+    def _assign_lyrics(self, row: list[TextWord], st: Staff, verse: int, sp: float, page: Page, sysm: System):
         # この五線の和音 (歌詞の対象) は self._cur_chords から
         chords = [e for e in self._cur_chords if e.staff is st and e.kind == "chord"]
         if not chords:
             return
         chords.sort(key=lambda e: e.cx)
         cxs = [e.cx for e in chords]
-        for w in row:
-            # 単語を 1 つ以上の音符に割り当てる (文字単位で分割しうる)
+        size = row[0].size
+        base = statistics.median(w.y for w in row)
+        dashes = [sg for sg in page.segs if sg.horizontal and base - 0.6 * size < sg.y0 < base - 0.1 * size
+                  and sg.x1 - sg.x0 < 2 * size and sysm.x0 - sp <= sg.x0 <= sysm.x1 + sp]
+
+        def dash_between(x0, x1):
+            return any(x0 - 0.5 <= sg.x0 and sg.x1 <= x1 + 0.5 for sg in dashes)
+
+        items = []  # [(lyric dict, 前にハイフン, 後ろにハイフン)]
+        prev_x1 = sysm.x0
+        for wi, w in enumerate(row):
+            next_x0 = row[wi + 1].x0 if wi + 1 < len(row) else sysm.x1 + sp
             segs = _split_word(w, cxs, sp)
-            for text, ci, syl in segs:
+            for si_, (text, ci, _) in enumerate(segs):
                 ev = chords[ci]
-                if any(l.get("verse", 1) == verse for l in ev.lyrics):
+                if any(ly.get("verse", 1) == verse for ly in ev.lyrics):
                     continue
                 item = {"text": text}
                 if verse > 1:
                     item["verse"] = verse
-                if syl:
-                    item["syllabic"] = syl
                 ev.lyrics.append(item)
+                before = si_ == 0 and dash_between(prev_x1, w.x0)
+                after = si_ == len(segs) - 1 and dash_between(w.x1, next_x0)
+                items.append([item, before, after])
+            prev_x1 = w.x1
+        for item, before, after in items:
+            syl = {(False, True): "begin", (True, True): "middle", (True, False): "end"}.get((before, after))
+            if syl:
+                item["syllabic"] = syl
+
+
+def _fix_tuplet_ratio(voice: list[Event], mlen: Fraction):
+    """小節の長さに合わない場合、連符の比率 (normal) を別の候補に変えて合わせる。"""
+    def total():
+        return sum((mlen if e.measure_rest else e.length() for e in voice), Fraction(0))
+    if total() == mlen:
+        return
+    gids = list(dict.fromkeys(e.tuplet[0] for e in voice if e.tuplet))
+    for gid in gids:
+        members = [e for e in voice if e.tuplet and e.tuplet[0] == gid]
+        actual, normal0 = members[0].tuplet[1], members[0].tuplet[2]
+        cands = [c for c in (actual - 1, actual, actual + 1, actual // 2, actual * 2, 2, 3, 4, 6, 8) if c > 0 and c != normal0]
+        for c in cands:
+            for e in members:
+                e.tuplet = (gid, actual, c)
+            if total() == mlen:
+                return
+        for e in members:
+            e.tuplet = (gid, actual, normal0)
 
 
 def _split_word(w: TextWord, cxs: list[float], sp: float):

@@ -14,6 +14,10 @@ from pdf2mscz import ir, mscx_read  # noqa: E402
 from pdf2mscz.recognize import recognize  # noqa: E402
 
 
+# 見た目 (線の位置と符頭) が同じドラムは区別できないので同一視する
+DRUM_SAME = {36: 35, 40: 38, 43: 41, 50: 48, 55: 52, 57: 52}
+
+
 def flatten(score):
     notes, rests, lyrics, harm = Counter(), Counter(), Counter(), Counter()
     for mi, m, mlen, _ in ir.iter_measure_context(score):
@@ -30,10 +34,10 @@ def flatten(score):
                         ln = ir.event_length(e, mlen) * scale
                         if e["type"] == "chord":
                             for n in e["notes"]:
-                                p = n.get("drum") if "drum" in n else n["pitch"]
+                                p = DRUM_SAME.get(n["drum"], n["drum"]) if "drum" in n else n["pitch"]
                                 notes[(mi, si, t, ln, p)] += 1
                             for ly in e.get("lyrics", []):
-                                lyrics[(mi, si, t, ly.get("verse", 1), ly["text"])] += 1
+                                lyrics[(mi, si, t, ly.get("verse", 1), ly["text"], ly.get("syllabic", "single"))] += 1
                         elif e.get("visible", True):
                             rests[(mi, si, t, ln)] += 1
                         t += ln

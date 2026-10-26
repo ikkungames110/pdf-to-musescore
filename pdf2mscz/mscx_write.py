@@ -320,6 +320,23 @@ def _harmony_writer(w: _W, name: str):
     return fn
 
 
+def _clef_writer(w: _W, clef: str):
+    def fn():
+        w.open("Clef")
+        w.leaf("concertClefType", clef)
+        w.leaf("transposingClefType", clef)
+        w.close("Clef")
+    return fn
+
+
+def _key_writer(w: _W, key: int):
+    def fn():
+        w.open("KeySig")
+        w.leaf("accidental", key)
+        w.close("KeySig")
+    return fn
+
+
 def _text_writer(w: _W, tag: str, text: str, extra=None):
     def fn():
         w.open(tag)
@@ -404,6 +421,8 @@ def to_mscx(score: dict) -> str:
                         w.leaf("transposingClefType", clef)
                         w.close("Clef")
                     key = m.get("key", prev_key if prev_key is not None else 0)
+                    if m.get("keyAt", "0") != "0" and mi > 0:
+                        key = prev_key  # 小節途中の変更は後で書く
                     if mi == 0 or ("key" in m and key != prev_key):
                         w.open("KeySig")
                         w.leaf("accidental", key)
@@ -430,6 +449,18 @@ def to_mscx(score: dict) -> str:
                         annots.append((Fraction(0), _text_writer(w, "RehearsalMark", m["rehearsal"])))
                     for h in st.get("harmony", []):
                         annots.append((Fraction(h.get("at", "0")), _harmony_writer(w, h["name"])))
+                    is_drum = staff_part[si].get("instrument") == "drumset"
+                    st_keys = False
+                    for ch in st.get("changes", []):
+                        if "clef" in ch:
+                            annots.append((Fraction(ch["at"]), _clef_writer(w, ch["clef"])))
+                        if "key" in ch and not is_drum:
+                            st_keys = True
+                            annots.append((Fraction(ch["at"]), _key_writer(w, ch["key"])))
+                    if m.get("keyAt", "0") != "0" and not st_keys and not is_drum:
+                        annots.append((Fraction(m["keyAt"]), _key_writer(w, m["key"])))
+                    if m.get("keyAt", "0") != "0":
+                        prev_key = m["key"]
                     for tx in st.get("texts", []):
                         annots.append((Fraction(tx.get("at", "0")), _text_writer(w, "StaffText", tx["text"])))
                     annots.sort(key=lambda a: a[0])
