@@ -16,6 +16,9 @@ from pdf2mscz.layout import find_systems, stem_width  # noqa: E402
 from pdf2mscz.recognize import recognize  # noqa: E402
 
 pdf, mno = sys.argv[1], int(sys.argv[2])
+if not os.path.exists(pdf):  # macOS で作られたファイル名 (NFD) 対策
+    import unicodedata
+    pdf = unicodedata.normalize("NFD", pdf)
 staff = int(sys.argv[3]) if len(sys.argv) > 4 else None
 out = sys.argv[-1]
 pages = extract(pdf)

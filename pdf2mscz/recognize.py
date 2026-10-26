@@ -897,18 +897,21 @@ class Recognizer:
                 if ev.stem_dir == "up":
                     return y < ev.stem.y0 + 0.5 * sp
                 return y > ev.stem.y1 - 0.5 * sp
-            cand = [e for e in events if abs(e.cx - cx) < 8 * sp and vdist(e) < 4 * sp and beam_side(e)]
-            if not cand:
-                continue
             # 括弧 (ブラケット) を探す
             left = [s for s in segs if not s.vertical and abs(s.x1 - x0) < 1.5 * sp and min(abs(s.y0 - y), abs(s.y1 - y)) < 1.5 * sp and s.x1 - s.x0 > 0.5 * sp]
             right = [s for s in segs if not s.vertical and abs(s.x0 - x1) < 1.5 * sp and min(abs(s.y0 - y), abs(s.y1 - y)) < 1.5 * sp and s.x1 - s.x0 > 0.5 * sp]
-            staff = min(cand, key=lambda e: (vdist(e), abs(e.cx - cx))).staff
             if left and right:
                 bx0 = min(s.x0 for s in left)
                 bx1 = max(s.x1 for s in right)
-                group = [e for e in events if e.staff is staff and bx0 - 0.5 * sp <= e.cx <= bx1 + 0.5 * sp]
+                inside = [e for e in events if bx0 - 0.5 * sp <= e.cx <= bx1 + 0.5 * sp and vdist(e) < 6 * sp]
+                if not inside:
+                    continue
+                staff = min(inside, key=vdist).staff
+                group = [e for e in inside if e.staff is staff]
             else:
+                cand = [e for e in events if abs(e.cx - cx) < 8 * sp and vdist(e) < 4 * sp and beam_side(e)]
+                if not cand:
+                    continue
                 yc = y - 0.35 * (x1 - x0 + 1)  # 数字の縦の中心 (おおよそ)
 
                 def beam_dist(e):
