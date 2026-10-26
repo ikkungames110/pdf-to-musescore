@@ -1,0 +1,19 @@
+[project]
+name = "pdf2mscz"
+version = "0.1.0"
+description = "PDF 楽譜を解析して MuseScore (.mscz) に変換する"
+requires-python = ">=3.10"
+dependencies = ["pymupdf>=1.24"]
+
+[project.scripts]
+pdf2mscz = "pdf2mscz.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["pdf2mscz"]
+
+[tool.setuptools.package-data]
+pdf2mscz = ["data/*.xml"]

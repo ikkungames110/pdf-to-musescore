@@ -180,7 +180,7 @@ def group_words(chars: list[Char]) -> list[TextWord]:
                     words.append(cur)
                 cur = []
                 continue
-            if cur and c.x0 - cur[-1].x1 > 0.25 * c.size:
+            if cur and c.x0 - cur[-1].x1 > 0.07 * c.size:
                 words.append(cur)
                 cur = []
             cur.append(c)
@@ -453,7 +453,7 @@ class Recognizer:
                     if p.x0 - 0.15 * sp <= s.x0 <= p.x1 + 0.15 * sp:
                         t, _ = p.y_at(min(max(s.x0, p.x0), p.x1))
                         if abs(t - outer) < 0.05 * sp:
-                            beam_groups[id(ev)] = id(p)
+                            beam_groups[id(ev)] = p
             for f in flags:
                 if abs(f.x - s.x0) < 0.6 * sp and s.y0 - sp <= f.y <= s.y1 + sp:
                     n = max(n, smufl.FLAGS[f.code])
@@ -890,7 +890,14 @@ class Recognizer:
                 else:
                     lo = hi = ev.y
                 return 0 if lo <= y <= hi else min(abs(y - lo), abs(y - hi))
-            cand = [e for e in events if abs(e.cx - cx) < 8 * sp and vdist(e) < 4 * sp]
+            def beam_side(ev):
+                # 連符の数字は符幹の先端 (連桁) 側に置かれる
+                if ev.stem is None or ev.kind != "chord":
+                    return True
+                if ev.stem_dir == "up":
+                    return y < ev.stem.y0 + 0.5 * sp
+                return y > ev.stem.y1 - 0.5 * sp
+            cand = [e for e in events if abs(e.cx - cx) < 8 * sp and vdist(e) < 4 * sp and beam_side(e)]
             if not cand:
                 continue
             # 括弧 (ブラケット) を探す
@@ -902,12 +909,20 @@ class Recognizer:
                 bx1 = max(s.x1 for s in right)
                 group = [e for e in events if e.staff is staff and bx0 - 0.5 * sp <= e.cx <= bx1 + 0.5 * sp]
             else:
+                yc = y - 0.35 * (x1 - x0 + 1)  # 数字の縦の中心 (おおよそ)
+
+                def beam_dist(e):
+                    p = beam_groups[id(e)]
+                    xx = min(max(cx, p.x0), p.x1)
+                    t, b = p.y_at(xx)
+                    return min(abs(yc - t), abs(yc - b)) + abs(cx - xx)
                 near = min((e for e in cand if e.kind == "chord" and id(e) in beam_groups),
-                           key=lambda e: abs(e.cx - cx), default=None)
+                           key=beam_dist, default=None)
                 if near is None:
                     continue
+                staff = near.staff
                 bg = beam_groups[id(near)]
-                group = [e for e in chords if beam_groups.get(id(e)) == bg]
+                group = [e for e in chords if beam_groups.get(id(e)) is bg]
                 # 連桁の途中にある休符
                 if group:
                     gx0, gx1 = min(e.cx for e in group), max(e.cx for e in group)
@@ -1044,6 +1059,11 @@ class Recognizer:
                 if txt:
                     out.setdefault(measure_of(r.x0 + 1.5 * sp), []).append(("rehearsal", txt))
                     used.update(id(c) for c in inside)
+        # 枠なしの練習番号: 最上段の上にある太字の短い文字列
+        for w in group_words([c for c in chars if id(c) not in used and "Bold" in c.font and c.y < sysm.top]):
+            if len(w.text) <= 3 and w.size >= 9 and w.y > sysm.top - 8 * sp:
+                out.setdefault(measure_of(w.x0 + 1.5 * sp), []).append(("rehearsal", w.text))
+                used.update(id(c) for c in w.chars)
         # 小節番号 (段頭の斜体数字) と連符の数字は除外
         rest = [c for c in chars if id(c) not in used and not ("Italic" in c.font and c.c.isdigit())]
         words = group_words(rest)
@@ -1140,6 +1160,13 @@ def _fix_tuplet_ratio(voice: list[Event], mlen: Fraction):
 def _split_word(w: TextWord, cxs: list[float], sp: float):
     """単語 w を音符の中心 cxs に合わせて分割する。[(文字列, 音符番号, syllabic)]。"""
     import bisect
+    # 分割するのは日本語 (かな・漢字) の文字列だけ。欧文の単語は 1 音節として扱う
+    if not any(ord(c.c) >= 0x3000 for c in w.chars):
+        lo = bisect.bisect_left(cxs, w.x0 - 3 * sp)
+        hi = bisect.bisect_right(cxs, w.x1 + 3 * sp)
+        if lo >= hi:
+            return []
+        return [(w.text, min(range(lo, hi), key=lambda i: abs(cxs[i] - w.cx)), None)]
     lo = bisect.bisect_left(cxs, w.x0 - 3 * sp)
     hi = bisect.bisect_right(cxs, w.x1 + 3 * sp)
     cand = list(range(lo, hi))

@@ -146,6 +146,10 @@ def extract_page(page: pymupdf.Page, index: int) -> Page:
             ys = [p[1] for p in pts]
             out.polys.append(Poly(pts, min(xs), min(ys), max(xs), max(ys)))
             continue
+        if "c" in kinds and kinds.count("c") == 4 and kinds.count("l") == 4 and "s" in dr["type"]:
+            r = dr["rect"]  # 角丸の枠 (練習番号など)
+            out.rects.append(Rect(r.x0, r.y0, r.x1, r.y1))
+            continue
         if "c" in kinds:
             first, last = items[0], items[len(items) // 2 - 1] if len(items) >= 2 else items[0]
             r = dr["rect"]

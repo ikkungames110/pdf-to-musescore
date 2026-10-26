@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: pdf2mscz
+Version: 0.1.0
+Summary: PDF 楽譜を解析して MuseScore (.mscz) に変換する
+Requires-Python: >=3.10
+Requires-Dist: pymupdf>=1.24
